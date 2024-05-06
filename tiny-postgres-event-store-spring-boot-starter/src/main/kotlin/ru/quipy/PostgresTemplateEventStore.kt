@@ -66,7 +66,7 @@ open class PostgresTemplateEventStore(
                     preparedStatement.setString(EventRecordTable.aggregateTableName.index, aggregateTableName)
                     preparedStatement.setString(EventRecordTable.aggregateId.index, item.aggregateId.toString())
                     preparedStatement.setLong(EventRecordTable.aggregateVersion.index, item.aggregateVersion)
-                    preparedStatement.setLong(EventRecordTable.eventTitle.index, item.aggregateVersion)
+                    preparedStatement.setString(EventRecordTable.eventTitle.index, item.eventTitle)
                     preparedStatement.setString(EventRecordTable.payload.index, item.payload)
                     preparedStatement.setString(
                         EventRecordTable.sagaContext.index,
