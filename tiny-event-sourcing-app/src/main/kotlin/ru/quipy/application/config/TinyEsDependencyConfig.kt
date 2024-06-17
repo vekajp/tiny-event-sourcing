@@ -80,7 +80,7 @@ class TinyEsDependencyConfig private constructor() {
             eventStore
         )
         val sagaManager = SagaManager(sagaStepEsService)
-        val sagaEventStream = SagaEventStream(aggregateRegistry, eventStreamManager, sagaStepEsService)
+        val sagaEventStream = SagaEventStream(aggregateRegistry, eventStreamManager, sagaStepEsService, eventSourcingProperties)
 
         this.tinyEsLibConfig = TinyEsLibConfig(
             objectMapper,
