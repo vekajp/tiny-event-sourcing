@@ -30,14 +30,14 @@ class EventSourcingService<ID : Any, A : Aggregate, S : AggregateState<ID, A>>(
             ?: throw IllegalArgumentException("Aggregate $aggregateClass is not registered")
 
     fun <E : Event<A>> create(sagaContext: SagaContext = SagaContext(), command: (a: S) -> E): E {
-        val emptyAggregateState = aggregateInfo.emptyStateCreator.invoke()
+        val emptyAggregateState = aggregateInfo.emptyStateCreator()
         return tryUpdate(emptyAggregateState, 0, command, sagaContext)
     }
 
     @OptIn(ExperimentalTypeInference::class)
     @OverloadResolutionByLambdaReturnType
     fun <E : Event<A>> create(sagaContext: SagaContext = SagaContext(), command: (a: S) -> List<E>): List<E> {
-        val emptyAggregateState = aggregateInfo.emptyStateCreator.invoke()
+        val emptyAggregateState = aggregateInfo.emptyStateCreator()
         return tryUpdate(emptyAggregateState, 0, command, sagaContext)
     }
 
@@ -163,7 +163,6 @@ class EventSourcingService<ID : Any, A : Aggregate, S : AggregateState<ID, A>>(
                 logger.info("Optimistic lock exception. Failed to save event records id: ${e.eventRecords.map { it.id }}")
                 if (numOfAttempts++ >= eventSourcingProperties.spinLockMaxAttempts)
                     throw IllegalStateException("Too many attempts to save event records: ${e.eventRecords}")
-
                 continue
             }
         }

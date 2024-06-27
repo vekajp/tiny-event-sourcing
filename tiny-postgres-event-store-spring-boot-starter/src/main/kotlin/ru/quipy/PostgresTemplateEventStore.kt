@@ -4,56 +4,91 @@ import org.apache.logging.log4j.LogManager
 import org.springframework.dao.DuplicateKeyException
 import org.springframework.jdbc.core.BatchPreparedStatementSetter
 import org.springframework.jdbc.core.JdbcTemplate
+import org.springframework.jdbc.core.SqlOutParameter
+import org.springframework.jdbc.core.SqlParameter
 import org.springframework.transaction.annotation.Transactional
 import ru.quipy.converter.EntityConverter
+import ru.quipy.core.BatchMode.JDBC_BATCH
+import ru.quipy.core.BatchMode.STORED_PROCEDURE
+import ru.quipy.core.EventSourcingProperties
 import ru.quipy.core.exceptions.DuplicateEventIdException
 import ru.quipy.database.EventStore
-import ru.quipy.domain.ActiveEventStreamReader
-import ru.quipy.domain.EventRecord
-import ru.quipy.domain.EventStreamReadIndex
-import ru.quipy.domain.Snapshot
-import ru.quipy.domain.Unique
-import ru.quipy.domain.Versioned
+import ru.quipy.domain.*
 import ru.quipy.mappers.MapperFactory
 import ru.quipy.query.Query
 import ru.quipy.query.QueryBuilder
 import ru.quipy.query.select.SelectQuery
-import ru.quipy.saga.SagaContext
-import ru.quipy.tables.ActiveEventStreamReaderDto
-import ru.quipy.tables.DtoCreator
-import ru.quipy.tables.EventRecordDto
-import ru.quipy.tables.EventRecordTable
-import ru.quipy.tables.EventStreamActiveReadersTable
-import ru.quipy.tables.EventStreamReadIndexDto
-import ru.quipy.tables.SnapshotDto
+import ru.quipy.tables.*
+import ru.quipy.utils.Batcher
 import java.sql.PreparedStatement
 import java.sql.SQLException
+import java.sql.Types
 import kotlin.reflect.KClass
+import kotlin.time.Duration.Companion.milliseconds
+
 
 open class PostgresTemplateEventStore(
     private val jdbcTemplate: JdbcTemplate,
     private val eventStoreSchemaName: String,
     private val mapperFactory: MapperFactory,
-    private val entityConverter: EntityConverter) : EventStore {
+    private val entityConverter: EntityConverter,
+    private val props: EventSourcingProperties,
+) : EventStore {
+
+    private val batcher: Batcher = Batcher(props.batchSize, (props.batchPeriodMillis).milliseconds) { statements ->
+        when(props.batchMode) {
+            JDBC_BATCH.name -> jdbcTemplate.batchUpdate(*(statements.toTypedArray())).toTypedArray()
+            STORED_PROCEDURE.name -> executeSqlCommands(statements)
+            else -> throw IllegalArgumentException("Unsupported batch mode: ${props.batchMode}")
+        }
+    }
     companion object {
         private val logger = LogManager.getLogger(PostgresTemplateEventStore::class)
+        const val PROCEDURE_NAME: String = "execute_batch"
     }
+
     override fun insertEventRecord(aggregateTableName: String, eventRecord: EventRecord) {
         try {
-            jdbcTemplate.execute(
-                QueryBuilder.insert(
-                    eventStoreSchemaName,
-                    EventRecordDto(eventRecord, aggregateTableName, entityConverter)
-                ).build()
-            )
-        } catch (e : DuplicateKeyException) {
+            val statement = QueryBuilder.insert(
+                eventStoreSchemaName,
+                EventRecordDto(eventRecord, aggregateTableName, entityConverter)
+            ).build()
+
+            if (props.batchEnabled) {
+                val res = batcher.delayedExecution(eventRecord.id, statement).get()
+                if (!res) {
+                    logger.warn("Failed to insert event within batch. Retrying: $statement")
+                    throw DuplicateEventIdException("Batch returned error for: $eventRecord", null)
+                }
+            } else {
+                jdbcTemplate.execute(statement)
+            }
+        } catch (e: DuplicateKeyException) {
             throw DuplicateEventIdException("There is record with such an id. Record cannot be saved $eventRecord", e)
         }
     }
 
+    private fun executeSqlCommands(commands: List<String>): Array<Int> {
+        val result = jdbcTemplate.call(
+            { con ->
+                val cs = con.prepareCall("{? = call $PROCEDURE_NAME(?)}")
+                cs.registerOutParameter(1, Types.ARRAY)
+                cs.setArray(2, con.createArrayOf("text", commands.toTypedArray()))
+                cs
+            },
+            listOf<SqlParameter>(
+                SqlOutParameter("return", Types.ARRAY)
+            )
+        )
+
+        val sqlArray = result["return"] as java.sql.Array
+        val output = sqlArray.array as Array<Int>
+        return output
+    }
+
     @Transactional
     override fun insertEventRecords(aggregateTableName: String, eventRecords: List<EventRecord>) {
-        val template =  QueryBuilder.batchInsert(eventStoreSchemaName,
+        val template = QueryBuilder.batchInsert(eventStoreSchemaName,
             EventRecordTable.name,
             eventRecords.map { EventRecordDto(it, aggregateTableName, entityConverter) }
         ).getTemplate()
@@ -78,7 +113,7 @@ open class PostgresTemplateEventStore(
                     return eventRecords.size
                 }
             })
-        } catch (e :  DuplicateKeyException) {
+        } catch (e:  DuplicateKeyException) {
             throw DuplicateEventIdException(
                 "There is record with such an id. Record set cannot be saved $eventRecords",
                 e
@@ -163,11 +198,11 @@ open class PostgresTemplateEventStore(
         ).firstOrNull()
     }
 
-    private fun executeQueryReturningBoolean(query: Query) : Boolean{
+    private fun executeQueryReturningBoolean(query: Query): Boolean {
         return try {
             jdbcTemplate.execute(query.build())
             true
-        } catch (e : Exception) {
+        } catch (e: Exception) {
             logger.error(e.stackTrace)
             false
         }
